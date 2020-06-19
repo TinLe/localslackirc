@@ -360,7 +360,7 @@ class Rocket:
             except Exception:
                 pass
 
-            if data.get('msg') == 'changed' and data.get('collection') == 'stream-room-messages': # New message
+            if data.get('msg') == 'changed' and data.get('collection') == 'stream-room-messages':  # New message
                 try:
                     # If the sender is unknown, add it
                     if data['fields']['args'][0]['u']['_id'] not in self._users:

@@ -34,6 +34,7 @@ import pwd
 from socket import gethostname
 import sys
 import traceback
+import random
 
 import slack
 import rocket
@@ -44,6 +45,7 @@ from log import *
 _MENTIONS_REGEXP = re.compile(r'<@([0-9A-Za-z]+)>')
 _CHANNEL_MENTIONS_REGEXP = re.compile(r'<#[A-Z0-9]+\|([A-Z0-9\-a-z]+)>')
 _URL_REGEXP = re.compile(r'<([a-z0-9\-\.]+)://([^\s\|]+)[\|]{0,1}([^<>]*)>')
+_RAND_REGEXP = re.compile(r'\.rand\s+([0-9]+)\s+([0-9]+)')
 
 
 _SLACK_SUBSTITUTIONS = [
@@ -101,7 +103,7 @@ class Client:
         self.sl_client = sl_client
         self.nouserlist = nouserlist
         self.autojoin = autojoin
-        self._usersent = False # Used to hold all events until the IRC client sends the initial USER message
+        self._usersent = False  # Used to hold all events until the IRC client sends the initial USER message
         self._held_events: List[slack.SlackEvent] = []
         self._magic_users_id = 0
         self._magic_regex: Optional[re.Pattern] = None
@@ -116,9 +118,10 @@ class Client:
         self.nick = nick.strip()
         assert self.sl_client.login_info
         if self.nick != self.sl_client.login_info.self.name.encode('ascii'):
-            self._sendreply(Replies.ERR_ERRONEUSNICKNAME, 'Incorrect nickname, use %s' % self.sl_client.login_info.self.name)
+            self._sendreply(Replies.ERR_ERRONEUSNICKNAME, 'Incorrect nickname, use {}'.format(self.sl_client.login_info.self.name))
+            # self._sendreply(Replies.ERR_ERRONEUSNICKNAME, 'Incorrect nickname, use %s' % self.sl_client.login_info.self.name)
 
-    def _sendreply(self, code: Union[int,Replies], message: Union[str,bytes], extratokens: Iterable[Union[str,bytes]] = []) -> None:
+    def _sendreply(self, code: Union[int, Replies], message: Union[str, bytes], extratokens: Iterable[Union[str, bytes]] = []) -> None:
         codeint = code if isinstance(code, int) else code.value
         bytemsg = message if isinstance(message, bytes) else message.encode('utf8')
 
@@ -126,13 +129,22 @@ class Client:
 
         extratokens.insert(0, self.nick)
 
-        self.s.send(b':%s %03d %s :%s\n' % (
-            self.hostname,
-            codeint,
-            b' '.join(i if isinstance(i, bytes) else i.encode('utf8') for i in extratokens),
-            bytemsg,
-        ))
-
+        try:
+            self.s.send(b':%s %03d %s :%s\n' % (
+                self.hostname,
+                codeint,
+                b' '.join(i if isinstance(i, bytes) else i.encode('utf8') for i in extratokens),
+                bytemsg,
+            ))
+        except Exception as e:
+            log("self.s.send(:%s %03d %s: %s) got Exception %s" % (
+                self.hostname,
+                codeint,
+                b' '.join(i if isinstance(i, bytes) else i.encode('utf8') for i in extratokens),
+                bytemsg,
+                e
+            ))
+            return
 
     def _userhandler(self, cmd: bytes) -> None:
         #TODO USER salvo 8 * :Salvatore Tomaselli
@@ -217,7 +229,8 @@ class Client:
 
             users = b' '.join(userlist)
 
-        self.s.send(b':%s!salvo@127.0.0.1 JOIN %s\n' % (self.nick, channel_name))
+        # self.s.send(b':%s!salvo@127.0.0.1 JOIN %s\n' % (self.nick, channel_name))
+        self.s.send(b':%s!%s@127.0.0.1 JOIN %s\n' % (self.nick, self.nick, channel_name))
         self._sendreply(Replies.RPL_TOPIC, slchan.real_topic, [channel_name])
         self._sendreply(Replies.RPL_NAMREPLY, b'' if self.nouserlist else users, ['=', channel_name])
         self._sendreply(Replies.RPL_ENDOFNAMES, 'End of NAMES list', [channel_name])
@@ -343,7 +356,7 @@ class Client:
 
     def _userhosthandler(self, cmd: bytes) -> None:
         nicknames = cmd.split(b' ')
-        del nicknames[0] # Remove the command itself
+        del nicknames[0]  # Remove the command itself
         #TODO replace + with - in case of away
         #TODO append a * to the nickname for OP
 
@@ -383,9 +396,11 @@ class Client:
         self._sendreply(Replies.RPL_ENDOFWHO, 'End of WHO list', [name])
 
     def sendmsg(self, from_: bytes, to: bytes, message: bytes) -> None:
-        self.s.send(b':%s!salvo@127.0.0.1 PRIVMSG %s :%s\n' % (
+        # self.s.send(b':%s!salvo@127.0.0.1 PRIVMSG %s :%s\n' % (
+        self.s.send(b':%s!%s@127.0.0.1 PRIVMSG %s :%s\n' % (
             from_,
-            to, #private message, or a channel
+            self.nick,
+            to,  # private message, or a channel
             message,
         ))
 
@@ -408,7 +423,6 @@ class Client:
         # Extremely inefficient code to generate mentions
         # Just doing them client-side on the receiving end is too mainstream
 
-
         if self._magic_users_id == id(self.sl_client.get_usernames()):
             regex = self._magic_regex
             assert regex
@@ -421,11 +435,11 @@ class Client:
             self._magic_regex = regex
 
         matches = list(re.finditer(regex, msg))
-        matches.reverse() # I want to replace from end to start or the positions get broken
+        matches.reverse()  # I want to replace from end to start or the positions get broken
         for m in matches:
             username = m.string[m.start():m.end()]
             if username.startswith('://'):
-                continue # Match inside a url
+                continue  # Match inside a url
             elif self.provider == Provider.SLACK:
                 msg = msg[0:m.start()] + '<@%s>' % self.sl_client.get_user_by_name(username).id + msg[m.end():]
             elif self.provider == Provider.ROCKETCHAT:
@@ -433,9 +447,25 @@ class Client:
         return msg
 
     def parse_message(self, msg: str) -> Iterator[bytes]:
+        log("parse_message: msg=({}) ".format(msg))
         for i in msg.split('\n'):
+            log("parse_message: i=({}) ".format(i))
             if not i:
                 continue
+
+            """
+            Add in bot stuff here.
+            ===============================================================
+            bot_rand = _RAND_REGEXP.search(i)
+            if bot_rand:
+                rnd1, rnd2 = bot_rand.groups()
+                rndnum = random.randrange(int(rnd1), int(rnd2))
+                log("got a .rand request; rnd1={}, rnd2={}, rndnum={}".format(rnd1, rnd2, rndnum))
+                i = ".rand {} {} = {}".format(int(rnd1), int(rnd2), rndnum)
+                encoded = i.encode('utf8')
+                yield encoded
+            ===============================================================
+            """
 
             # Replace all mentions with @user
             while True:
@@ -486,10 +516,10 @@ class Client:
                 encoded = encoded.replace(b'@here', b'yelling [%s]' % self.nick)
                 encoded = encoded.replace(b'@channel', b'YELLING LOUDER [%s]' % self.nick)
 
+            log("leaving parse_message encoded={}".format(encoded))
             yield encoded
 
-
-    def _message(self, sl_ev: Union[slack.Message, slack.MessageDelete, slack.MessageBot, slack.ActionMessage], prefix: str=''):
+    def _message(self, sl_ev: Union[slack.Message, slack.MessageDelete, slack.MessageBot, slack.ActionMessage], prefix: str = ''):
         """
         Sends a message to the irc client
         """
@@ -502,7 +532,7 @@ class Client:
         except KeyError:
             dest = self.nick
         except Exception as e:
-            log('Error: ', str(e))
+            log('_message Error: ', str(e))
             return
         if dest in self.parted_channels:
             # Ignoring messages, channel was left on IRC
@@ -524,16 +554,19 @@ class Client:
         user = self.sl_client.get_user(sl_ev.user)
         if user.deleted:
             return
-        channel = self.sl_client.get_channel(sl_ev.channel)
-        dest = b'#' + channel.name.encode('utf8')
-        if dest in self.parted_channels:
-            return
-        name = user.name.encode('utf8')
-        rname = user.real_name.replace(' ', '_').encode('utf8')
-        if joined:
-            self.s.send(b':%s!%s@127.0.0.1 JOIN :%s\n' % (name, rname, dest))
-        else:
-            self.s.send(b':%s!%s@127.0.0.1 PART %s\n' % (name, rname, dest))
+        try:
+            channel = self.sl_client.get_channel(sl_ev.channel)
+            dest = b'#' + channel.name.encode('utf8')
+            if dest in self.parted_channels:
+                return
+            name = user.name.encode('utf8')
+            rname = user.real_name.replace(' ', '_').encode('utf8')
+            if joined:
+                self.s.send(b':%s!%s@127.0.0.1 JOIN :%s\n' % (name, rname, dest))
+            else:
+                self.s.send(b':%s!%s@127.0.0.1 PART %s\n' % (name, rname, dest))
+        except Exception as e:
+            log("_joined_parted: channel {} is probably PRIVATE or threaded conversation!".format(channel))
 
     def slack_event(self, sl_ev: slack.SlackEvent) -> None:
         if not self._usersent:
@@ -629,34 +662,34 @@ def main() -> None:
 
     parser = argparse.ArgumentParser()
     parser.add_argument('-p', '--port', type=int, action='store', dest='port',
-                                default=9007, required=False,
-                                help='set port number. Defaults to 9007')
+                        default=9007, required=False,
+                        help='set port number. Defaults to 9007')
     parser.add_argument('-i', '--ip', type=str, action='store', dest='ip',
-                                default='127.0.0.1', required=False,
-                                help='set ip address')
+                        default='127.0.0.1', required=False,
+                        help='set ip address')
     parser.add_argument('-t', '--tokenfile', type=str, action='store', dest='tokenfile',
-                                default=expanduser('~')+'/.localslackirc',
-                                required=False,
-                                help='set the token file')
+                        default=expanduser('~')+'/.localslackirc',
+                        required=False,
+                        help='set the token file')
     parser.add_argument('-c', '--cookiefile', type=str, action='store', dest='cookiefile',
-                                default=None,
-                                required=False,
-                                help='set the cookie file (for slack only, for xoxc tokens)')
+                        default=None,
+                        required=False,
+                        help='set the cookie file (for slack only, for xoxc tokens)')
     parser.add_argument('-u', '--nouserlist', action='store_true',
-                                dest='nouserlist', required=False,
-                                help='don\'t display userlist')
+                        dest='nouserlist', required=False,
+                        help='don\'t display userlist')
     parser.add_argument('-j', '--autojoin', action='store_true',
-                                dest='autojoin', required=False,
-                                help="Automatically join all remote channels")
+                        dest='autojoin', required=False,
+                        help="Automatically join all remote channels")
     parser.add_argument('-o', '--override', action='store_true',
-                                dest='overridelocalip', required=False,
-                                help='allow non 127. addresses, this is potentially dangerous')
+                        dest='overridelocalip', required=False,
+                        help='allow non 127. addresses, this is potentially dangerous')
     parser.add_argument('--rc-url', type=str, action='store', dest='rc_url', default=None, required=False,
-                                help='The rocketchat URL. Setting this changes the mode from slack to rocketchat')
+                        help='The rocketchat URL. Setting this changes the mode from slack to rocketchat')
     parser.add_argument('-f', '--status-file', type=str, action='store', dest='status_file', required=False, default=None,
-                                help='Path to the file to keep the internal status.')
+                        help='Path to the file to keep the internal status.')
     parser.add_argument('--log-suffix', type=str, action='store', dest='log_suffix', default='',
-                                help='Set a suffix for the syslog identifier')
+                        help='Set a suffix for the syslog identifier')
 
     args = parser.parse_args()
 
@@ -724,7 +757,7 @@ def main() -> None:
 
     atexit.register(exit_hook, status_file, sl_client)
     term_f = lambda _, __: sys.exit(0)
-    signal.signal(signal.SIGHUP, term_f )
+    signal.signal(signal.SIGHUP, term_f)
     signal.signal(signal.SIGTERM, term_f)
 
     sl_events = sl_client.events_iter()
@@ -746,7 +779,7 @@ def main() -> None:
         # Main loop
         timeout = 2
         while True:
-            s_event: List[Tuple[int,int]] = poller.poll(timeout)
+            s_event: List[Tuple[int, int]] = poller.poll(timeout)
             sl_event = next(sl_events)
 
             if s_event:
@@ -760,9 +793,10 @@ def main() -> None:
                         ircclient.command(i)
 
             while sl_event:
-                log(sl_event)
+                log("in sl_event loop...")
                 ircclient.slack_event(sl_event)
                 sl_event = next(sl_events)
+
 
 if __name__ == '__main__':
     while True:

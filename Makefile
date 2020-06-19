@@ -1,9 +1,18 @@
+ROOT_DIR=$(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
+
 all:
 	@echo Nothing to do
 
 .PHONY: lint
 lint:
 	MYPYPATH=stubs mypy --config-file mypy.conf irc.py
+
+.PHONY: venv
+venv:
+	python3 -m venv venv3 && \
+		venv3/bin/pip install -U pip && \
+		venv3/bin/pip install -U setuptools && \
+		venv3/bin/pip install -r requirements.txt
 
 .PHONY: test
 test: lint

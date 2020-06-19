@@ -315,6 +315,7 @@ class SlackStatus:
     """
     last_timestamp: float = 0.0
 
+
 class Slack:
     def __init__(self, token: str, cookie: Optional[str], previous_status: Optional[bytes]) -> None:
         self.client = SlackClient(token, cookie)
@@ -347,9 +348,9 @@ class Slack:
             try:
                 response = load(p, History)
             except Exception as e:
-                    log('Failed to parse', e)
-                    log(p)
-                    break
+                log('Failed to parse', e)
+                log(p)
+                break
             r += [i for i in response.messages if i.ts != i.thread_ts]
             if response.has_more and response.response_metadata:
                 cursor = response.response_metadata.next_cursor
@@ -380,7 +381,7 @@ class Slack:
             log(f'Downloading logs from channel {channel.name_normalized}')
 
             cursor = None
-            while True: # Loop to iterate the cursor
+            while True:  # Loop to iterate the cursor
                 log('Calling cursor')
                 r = self.client.api_call(
                     'conversations.history',
@@ -444,7 +445,6 @@ class Slack:
         A status string that will be passed back when this is started again
         '''
         return json.dumps(dump(self._status), ensure_ascii=True).encode('ascii')
-
 
     def away(self, is_away: bool) -> None:
         """
@@ -587,7 +587,7 @@ class Slack:
         for im in self.get_ims():
             self._imcache[im.user] = im.id
             if im.id == im_id:
-                return im;
+                return im
         return None
 
     def get_ims(self) -> List[IM]:
@@ -750,6 +750,7 @@ class Slack:
         """
         This yields an event or None. Don't call it without sleeps
         """
+        log("entered events_iter...")
         sleeptime = 1
 
         while True:
@@ -777,6 +778,7 @@ class Slack:
             for event in events:
                 t = event.get('type')
                 ts = float(event.get('ts', 0))
+                log("envent type: %s (ts: %f)" % (t, ts))
 
                 if ts > self._status.last_timestamp:
                     self._status.last_timestamp = ts
@@ -797,15 +799,25 @@ class Slack:
                     ev = None
 
                 if isinstance(ev, Join):
-                    self._get_members_cache[ev.channel].add(ev.user)
+                    try:
+                        self._get_members_cache[ev.channel].add(ev.user)
+                    except Exception as e:
+                        log("Join: _get_members_cache[ev.channel {}] got exception: {}".format(ev.channel, e))
+                        ev = None
                 elif isinstance(ev, Leave):
-                    self._get_members_cache[ev.channel].remove(ev.user)
+                    try:
+                        self._get_members_cache[ev.channel].remove(ev.user)
+                    except Exception as e:
+                        log("Leave: _get_members_cache[ev.channel {}] got exception: {}".format(ev.channel, e))
+                        ev = None
 
                 if ev:
+                    log("yielding event ev...")
                     yield ev
 
 
                 subt = event.get('subtype')
+                log("   subtype: %s" % (subt))
 
                 try:
                     if t == 'message' and (not subt or subt == 'me_message'):
